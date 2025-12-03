@@ -11,32 +11,26 @@ async def run_listener():
         try:
             print(f"Starting listener for {CREATOR_USERNAME}...")
 
-            # Create client with your TikTok session cookie injected
+            # Correct cookie injection for TikTokLive 6.6.5
             client = TikTokLiveClient(
                 unique_id=CREATOR_USERNAME,
-                extra_headers={
+                headers={
                     "Cookie": f"sessionid={os.getenv('TIKTOK_SESSIONID')}"
                 }
             )
 
             @client.on(GiftEvent)
             async def on_gift(event: GiftEvent):
-                # Universal safe diamond extraction across TikTok versions
+                # Universal diamond extraction
                 diamond_value = None
 
-                # Newer field
                 if hasattr(event.gift, "diamond_count"):
                     diamond_value = event.gift.diamond_count
-
-                # Older TikTok field
                 elif hasattr(event.gift, "diamond_value"):
                     diamond_value = event.gift.diamond_value
-
-                # Nested info (used by many UK creators)
                 elif hasattr(event.gift, "info") and hasattr(event.gift.info, "diamond_count"):
                     diamond_value = event.gift.info.diamond_count
 
-                # Unknown or free gifts
                 if diamond_value is None:
                     diamond_value = 0
 
@@ -51,7 +45,6 @@ async def run_listener():
                 print("Total diamonds:", total)
                 print("----------------------\n")
 
-            # Connect and start listening
             await client.connect()
             print("Connected. Listening for gifts...")
             await client.listen()
