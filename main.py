@@ -14,7 +14,26 @@ async def run_listener():
 
             @client.on(GiftEvent)
             async def on_gift(event: GiftEvent):
-                diamond_value = event.gift.info.diamond_count
+
+                # Universal safe diamond extraction
+                diamond_value = None
+
+                # 1. Newer format
+                if hasattr(event.gift, "diamond_count"):
+                    diamond_value = event.gift.diamond_count
+
+                # 2. Older format
+                elif hasattr(event.gift, "diamond_value"):
+                    diamond_value = event.gift.diamond_value
+
+                # 3. Some accounts return nested info
+                elif hasattr(event.gift, "info") and hasattr(event.gift.info, "diamond_count"):
+                    diamond_value = event.gift.info.diamond_count
+
+                # 4. Fallback for free gifts or unknown fields
+                if diamond_value is None:
+                    diamond_value = 0
+
                 total = diamond_value * event.repeat_count
 
                 print("\n--- Gift Received ---")
@@ -26,7 +45,7 @@ async def run_listener():
                 print("Total diamonds:", total)
                 print("----------------------\n")
 
-            # Connect and listen using TikTokLive's supported methods
+            # Connect with official TikTokLive methods
             await client.connect()
             print("Connected. Listening for gifts...")
             await client.listen()
@@ -38,6 +57,7 @@ async def run_listener():
         except Exception as e:
             print(f"Error: {e}. Restarting in 10 seconds...")
             await asyncio.sleep(10)
+
 
 if __name__ == "__main__":
     asyncio.run(run_listener())
