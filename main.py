@@ -1,3 +1,4 @@
+import os
 import asyncio
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import GiftEvent
@@ -10,27 +11,32 @@ async def run_listener():
         try:
             print(f"Starting listener for {CREATOR_USERNAME}...")
 
-            client = TikTokLiveClient(unique_id=CREATOR_USERNAME)
+            # Create client with your TikTok session cookie injected
+            client = TikTokLiveClient(
+                unique_id=CREATOR_USERNAME,
+                extra_headers={
+                    "Cookie": f"sessionid={os.getenv('TIKTOK_SESSIONID')}"
+                }
+            )
 
             @client.on(GiftEvent)
             async def on_gift(event: GiftEvent):
-
-                # Universal safe diamond extraction
+                # Universal safe diamond extraction across TikTok versions
                 diamond_value = None
 
-                # 1. Newer format
+                # Newer field
                 if hasattr(event.gift, "diamond_count"):
                     diamond_value = event.gift.diamond_count
 
-                # 2. Older format
+                # Older TikTok field
                 elif hasattr(event.gift, "diamond_value"):
                     diamond_value = event.gift.diamond_value
 
-                # 3. Some accounts return nested info
+                # Nested info (used by many UK creators)
                 elif hasattr(event.gift, "info") and hasattr(event.gift.info, "diamond_count"):
                     diamond_value = event.gift.info.diamond_count
 
-                # 4. Fallback for free gifts or unknown fields
+                # Unknown or free gifts
                 if diamond_value is None:
                     diamond_value = 0
 
@@ -45,7 +51,7 @@ async def run_listener():
                 print("Total diamonds:", total)
                 print("----------------------\n")
 
-            # Connect with official TikTokLive methods
+            # Connect and start listening
             await client.connect()
             print("Connected. Listening for gifts...")
             await client.listen()
