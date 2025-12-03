@@ -8,13 +8,16 @@ client = TikTokLiveClient(unique_id=CREATOR_USERNAME)
 
 @client.on(GiftEvent)
 async def on_gift(event: GiftEvent):
+    diamond_value = event.gift.info.diamond_count
+    total = diamond_value * event.repeat_count
+
     print("\n--- Gift Received ---")
     print("Creator:", CREATOR_USERNAME)
     print("From:", event.user.nickname)
     print("Gift:", event.gift.name)
-    print("Diamonds per item:", event.gift.diamond_value)
+    print("Diamonds per item:", diamond_value)
     print("Count:", event.repeat_count)
-    print("Total diamonds:", event.gift.diamond_value * event.repeat_count)
+    print("Total diamonds:", total)
     print("----------------------\n")
 
 if __name__ == "__main__":
