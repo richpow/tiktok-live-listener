@@ -2,7 +2,7 @@ import asyncio
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import GiftEvent
 
-CREATOR_USERNAME = "stargirl09_"
+CREATOR_USERNAME = "stargirl09_"   # or whichever worked
 
 async def run_listener():
     while True:
@@ -16,6 +16,7 @@ async def run_listener():
 
                 diamond_value = None
 
+                # Handle all possible diamond fields safely
                 if hasattr(event.gift, "diamond_count"):
                     diamond_value = event.gift.diamond_count
                 elif hasattr(event.gift, "diamond_value"):
@@ -30,7 +31,8 @@ async def run_listener():
 
                 print("\n--- Gift Received ---")
                 print("Creator:", CREATOR_USERNAME)
-                print("From:", event.user.unique_id)
+                print("From:", event.user.unique_id)         # ← USERNAME
+                print("Display Name:", event.user.nickname)  # optional
                 print("Gift:", event.gift.name)
                 print("Diamonds per item:", diamond_value)
                 print("Count:", event.repeat_count)
