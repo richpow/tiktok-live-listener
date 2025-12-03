@@ -43,6 +43,9 @@ def load_creators():
 
 
 def load_gift_lookup():
+    """
+    Fetch gift data from StreamToEarn and build a name -> image url map.
+    """
     lookup = {}
     try:
         print("Fetching gift data from StreamToEarn")
@@ -50,6 +53,7 @@ def load_gift_lookup():
         resp.raise_for_status()
         data = resp.json()
 
+        # Determine correct list key
         if isinstance(data, dict):
             if "gifts" in data and isinstance(data["gifts"], list):
                 items = data["gifts"]
@@ -82,10 +86,10 @@ def load_gift_lookup():
                 lookup[name.lower()] = image_url
                 count += 1
 
-        print(f"Built gift lookup with {count} entries")
+        print(f"Gift lookup built with {count} entries")
 
     except Exception as e:
-        print("Failed to load gift lookup from StreamToEarn:", e)
+        print("Failed to load gift lookup:", e)
 
     return lookup
 
@@ -139,7 +143,6 @@ def send_discord_alert(
     creator_username,
     sender_username,
     sender_display_name,
-    sender_level,
     gift_name,
     diamonds_per_item,
     repeat_count,
@@ -150,7 +153,10 @@ def send_discord_alert(
         print("No webhook URL found")
         return
 
-    description_text = f"**{creator_username}** has just received a Gift **{gift_name}**"
+    diamonds_fmt = f"{diamonds_per_item:,}"
+    total_fmt = f"{total_diamonds:,}"
+
+    description_text = f"**{creator_username}** has just received a **{gift_name}**"
 
     embed = {
         "title": "Gift Alert",
@@ -158,21 +164,21 @@ def send_discord_alert(
         "color": 65280,
         "fields": [
             {"name": "Creator", "value": creator_username, "inline": False},
-            {
-                "name": "From",
-                "value": f"{sender_username} (Level {sender_level})",
-                "inline": False
-            },
+            {"name": "From", "value": sender_username, "inline": False},
             {"name": "Display Name", "value": sender_display_name, "inline": False},
             {"name": "Gift", "value": gift_name, "inline": False},
-            {"name": "Diamonds per item", "value": str(diamonds_per_item), "inline": True},
+            {"name": "Diamonds", "value": diamonds_fmt, "inline": True},
             {"name": "Count", "value": str(repeat_count), "inline": True},
-            {"name": "Total diamonds", "value": str(total_diamonds), "inline": False}
+            {"name": "Total diamonds", "value": total_fmt, "inline": False}
         ]
     }
 
+    # Small icon top right
     if gift_image_url:
-        embed["thumbnail"] = {"url": gift_image_url}
+        embed["author"] = {
+            "name": " ",
+            "icon_url": gift_image_url
+        }
 
     payload = {"embeds": [embed]}
 
@@ -196,33 +202,27 @@ async def run_listener_for_creator(creator_username):
                 sender_username = event.user.unique_id
                 sender_display_name = event.user.nickname
 
-                sender_level = getattr(event.user, "level", None)
-                if sender_level is None:
-                    sender_level = "Unknown"
-
                 gift_name = event.gift.name
 
-                diamond_value = None
+                # Extract diamond count
                 if hasattr(event.gift, "diamond_count"):
-                    diamond_value = event.gift.diamond_count
+                    diamonds_per_item = event.gift.diamond_count
                 elif hasattr(event.gift, "diamond_value"):
-                    diamond_value = event.gift.diamond_value
+                    diamonds_per_item = event.gift.diamond_value
                 elif hasattr(event.gift, "info") and hasattr(event.gift.info, "diamond_count"):
-                    diamond_value = event.gift.info.diamond_count
-
-                if diamond_value is None:
-                    diamond_value = 0
+                    diamonds_per_item = event.gift.info.diamond_count
+                else:
+                    diamonds_per_item = 0
 
                 repeat_count = event.repeat_count
-                total_diamonds = diamond_value * repeat_count
+                total_diamonds = diamonds_per_item * repeat_count
 
                 print("\n--- Gift Received ---")
                 print("Creator:", creator_username)
                 print("From username:", sender_username)
-                print("Sender level:", sender_level)
                 print("Display name:", sender_display_name)
                 print("Gift:", gift_name)
-                print("Diamonds per item:", diamond_value)
+                print("Diamonds per item:", diamonds_per_item)
                 print("Count:", repeat_count)
                 print("Total diamonds:", total_diamonds)
                 print("----------------------\n")
@@ -232,29 +232,30 @@ async def run_listener_for_creator(creator_username):
                     sender_username,
                     sender_display_name,
                     gift_name,
-                    diamond_value,
+                    diamonds_per_item,
                     repeat_count,
                     total_diamonds
                 )
 
+                # Lookup image from StreamToEarn
                 gift_key = gift_name.lower().strip()
                 gift_image_url = GIFT_LOOKUP.get(gift_key)
 
+                # Only send high value gift alerts
                 if total_diamonds >= DIAMOND_ALERT_THRESHOLD:
                     send_discord_alert(
                         creator_username,
                         sender_username,
                         sender_display_name,
-                        sender_level,
                         gift_name,
-                        diamond_value,
+                        diamonds_per_item,
                         repeat_count,
                         total_diamonds,
                         gift_image_url=gift_image_url
                     )
 
             await client.connect()
-            print(f"Connected. Listening for gifts for {creator_username}")
+            print(f"Connected. Listening for {creator_username}")
             await client.listen()
 
         except Exception as e:
@@ -267,12 +268,14 @@ async def run_listener_for_creator(creator_username):
 
             if offline_like:
                 print(
-                    f"Creator {creator_username} probably not live or TikTok returned bad data. Retrying this creator in 1800 seconds"
+                    f"{creator_username} appears offline or TikTok returned bad data. "
+                    f"Retrying in 1800 seconds"
                 )
                 await asyncio.sleep(1800)
             else:
                 print(
-                    f"Error in listener for {creator_username}: {e}. Restarting this creator in 10 seconds"
+                    f"Error in listener for {creator_username}: {e}. "
+                    f"Retrying in 10 seconds"
                 )
                 await asyncio.sleep(10)
 
@@ -281,16 +284,13 @@ async def main():
     global GIFT_LOOKUP
 
     GIFT_LOOKUP = load_gift_lookup()
-
     creators = load_creators()
 
     if not creators:
         print("No creators found with tiktok_username and creator_id")
         return
 
-    tasks = []
-    for username in creators:
-        tasks.append(asyncio.create_task(run_listener_for_creator(username)))
+    tasks = [asyncio.create_task(run_listener_for_creator(u)) for u in creators]
 
     print(f"Started {len(tasks)} listener tasks")
     await asyncio.gather(*tasks)
