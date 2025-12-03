@@ -10,6 +10,12 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 DIAMOND_ALERT_THRESHOLD = 3000
 
+# StreamToEarn gift API for GB
+GIFT_API_URL = "https://streamtoearn.io/api/v1/gifts?region=GB"
+
+# Global lookup: gift name (lowercased) -> image url
+GIFT_LOOKUP = {}
+
 
 def get_db():
     return psycopg2.connect(DATABASE_URL)
@@ -34,6 +40,58 @@ def load_creators():
     creators = [r[0] for r in rows]
     print(f"Loaded {len(creators)} creators from users")
     return creators
+
+
+def load_gift_lookup():
+    """
+    Fetch gift data from StreamToEarn and build a name -> image url map.
+    Handles a few possible JSON shapes and missing keys safely.
+    """
+    lookup = {}
+    try:
+        print("Fetching gift data from StreamToEarn")
+        resp = requests.get(GIFT_API_URL, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Some APIs use a top level list, some wrap in a 'gifts' or 'data' key
+        if isinstance(data, dict):
+            if "gifts" in data and isinstance(data["gifts"], list):
+                items = data["gifts"]
+            elif "data" in data and isinstance(data["data"], list):
+                items = data["data"]
+            else:
+                items = []
+        elif isinstance(data, list):
+            items = data
+        else:
+            items = []
+
+        count = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            name = item.get("name") or item.get("title") or item.get("gift_name")
+            if not name:
+                continue
+
+            image_url = (
+                item.get("image_url")
+                or item.get("image")
+                or item.get("icon")
+                or item.get("icon_url")
+            )
+
+            if image_url:
+                lookup[name.lower()] = image_url
+                count += 1
+
+        print(f"Built gift lookup with {count} entries")
+    except Exception as e:
+        print("Failed to load gift lookup from StreamToEarn:", e)
+
+    return lookup
 
 
 def log_gift_to_neon(
@@ -85,10 +143,12 @@ def send_discord_alert(
     creator_username,
     sender_username,
     sender_display_name,
+    sender_level,
     gift_name,
     diamonds_per_item,
     repeat_count,
-    total_diamonds
+    total_diamonds,
+    gift_image_url=None
 ):
     if not DISCORD_WEBHOOK_URL:
         print("No webhook URL found")
@@ -102,7 +162,11 @@ def send_discord_alert(
         "color": 65280,
         "fields": [
             {"name": "Creator", "value": creator_username, "inline": False},
-            {"name": "From", "value": sender_username, "inline": False},
+            {
+                "name": "From",
+                "value": f"{sender_username} (Level {sender_level})",
+                "inline": False
+            },
             {"name": "Display Name", "value": sender_display_name, "inline": False},
             {"name": "Gift", "value": gift_name, "inline": False},
             {"name": "Diamonds per item", "value": str(diamonds_per_item), "inline": True},
@@ -110,6 +174,10 @@ def send_discord_alert(
             {"name": "Total diamonds", "value": str(total_diamonds), "inline": False}
         ]
     }
+
+    # Add thumbnail if we have an image url
+    if gift_image_url:
+        embed["thumbnail"] = {"url": gift_image_url}
 
     payload = {"embeds": [embed]}
 
@@ -121,6 +189,8 @@ def send_discord_alert(
 
 
 async def run_listener_for_creator(creator_username):
+    global GIFT_LOOKUP
+
     while True:
         try:
             print(f"Starting listener for {creator_username}")
@@ -129,7 +199,8 @@ async def run_listener_for_creator(creator_username):
             @client.on(GiftEvent)
             async def on_gift(event: GiftEvent):
                 sender_username = event.user.unique_id
-                sender_display = event.user.nickname
+                sender_display_name = event.user.nickname
+                sender_level = event.user.level
                 gift_name = event.gift.name
 
                 diamond_value = None
@@ -149,7 +220,8 @@ async def run_listener_for_creator(creator_username):
                 print("\n--- Gift Received ---")
                 print("Creator:", creator_username)
                 print("From username:", sender_username)
-                print("Display name:", sender_display)
+                print("Sender level:", sender_level)
+                print("Display name:", sender_display_name)
                 print("Gift:", gift_name)
                 print("Diamonds per item:", diamond_value)
                 print("Count:", repeat_count)
@@ -159,22 +231,28 @@ async def run_listener_for_creator(creator_username):
                 log_gift_to_neon(
                     creator_username,
                     sender_username,
-                    sender_display,
+                    sender_display_name,
                     gift_name,
                     diamond_value,
                     repeat_count,
                     total_diamonds
                 )
 
+                # Look up image from StreamToEarn map
+                gift_key = gift_name.lower().strip()
+                gift_image_url = GIFT_LOOKUP.get(gift_key)
+
                 if total_diamonds >= DIAMOND_ALERT_THRESHOLD:
                     send_discord_alert(
                         creator_username,
                         sender_username,
-                        sender_display,
+                        sender_display_name,
+                        sender_level,
                         gift_name,
                         diamond_value,
                         repeat_count,
-                        total_diamonds
+                        total_diamonds,
+                        gift_image_url=gift_image_url
                     )
 
             await client.connect()
@@ -204,6 +282,11 @@ async def run_listener_for_creator(creator_username):
 
 
 async def main():
+    global GIFT_LOOKUP
+
+    # Load gift images once at startup
+    GIFT_LOOKUP = load_gift_lookup()
+
     creators = load_creators()
 
     if not creators:
