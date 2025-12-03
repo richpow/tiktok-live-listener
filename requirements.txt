@@ -1,3 +1,4 @@
 TikTokLive
 aiohttp
 psycopg2-binary
+requests
