@@ -11,17 +11,18 @@ async def run_listener():
         try:
             print(f"Starting listener for {CREATOR_USERNAME}...")
 
-            # Correct cookie injection for TikTokLive 6.6.5
-            client = TikTokLiveClient(
-                unique_id=CREATOR_USERNAME,
-                headers={
-                    "Cookie": f"sessionid={os.getenv('TIKTOK_SESSIONID')}"
-                }
-            )
+            # Create client normally (no headers here)
+            client = TikTokLiveClient(unique_id=CREATOR_USERNAME)
+
+            # Inject session cookie AFTER creation
+            session_cookie = os.getenv("TIKTOK_SESSIONID")
+            if session_cookie:
+                client.client.headers.update({
+                    "Cookie": f"sessionid={session_cookie}"
+                })
 
             @client.on(GiftEvent)
             async def on_gift(event: GiftEvent):
-                # Universal diamond extraction
                 diamond_value = None
 
                 if hasattr(event.gift, "diamond_count"):
