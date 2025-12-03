@@ -35,7 +35,6 @@ def load_creators():
     cur.close()
     conn.close()
 
-    # rows is list of tuples like [('name1',), ('name2',)]
     creators = [r[0] for r in rows]
     print(f"Loaded {len(creators)} creators from users")
     return creators
@@ -52,7 +51,6 @@ def log_gift_to_neon(
 ):
     """
     Insert a gift row into fasttrack_live_gifts.
-    Called from inside on_gift handlers.
     """
     try:
         conn = get_db()
@@ -93,7 +91,9 @@ def log_gift_to_neon(
 async def run_listener_for_creator(creator_username):
     """
     Runs one listener loop for a single creator.
-    Reconnects on errors.
+    If the errors look like offline or bad data,
+    wait 30 minutes before trying that creator again.
+    Otherwise, short retry.
     """
     while True:
         try:
@@ -150,11 +150,27 @@ async def run_listener_for_creator(creator_username):
             await client.listen()
 
         except Exception as e:
-            print(
-                f"Error in listener for {creator_username}: {e}. "
-                f"Restarting this creator in 10 seconds"
+            msg = str(e)
+            # Likely offline or bad response cases
+            offline_like = (
+                "UserNotFoundError" in msg
+                or "Expecting value: line 1 column 1" in msg
+                or "SIGN_NOT_200" in msg
             )
-            await asyncio.sleep(10)
+
+            if offline_like:
+                print(
+                    f"Creator {creator_username} probably not live "
+                    f"or TikTok returned bad data. "
+                    f"Will retry this creator in 1800 seconds"
+                )
+                await asyncio.sleep(1800)
+            else:
+                print(
+                    f"Error in listener for {creator_username}: {e}. "
+                    f"Restarting this creator in 10 seconds"
+                )
+                await asyncio.sleep(10)
 
 
 async def main():
@@ -163,9 +179,6 @@ async def main():
     if not creators:
         print("No creators found with tiktok_username and creator_id")
         return
-
-    # You can limit how many you start at once if needed, for example:
-    # creators = creators[:50]
 
     tasks = []
     for username in creators:
