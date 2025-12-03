@@ -10,11 +10,8 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 DIAMOND_ALERT_THRESHOLD = 3000
 
-# StreamToEarn gift API for GB
-GIFT_API_URL = "https://streamtoearn.io/api/v1/gifts?region=GB"
-
-# Global lookup: gift name (lowercased) -> image url
-GIFT_LOOKUP = {}
+# Your GitHub raw base path
+GITHUB_BASE = "https://raw.githubusercontent.com/richpow/tiktok-live-listener/main/gifts"
 
 
 def get_db():
@@ -24,6 +21,7 @@ def get_db():
 def load_creators():
     conn = get_db()
     cur = conn.cursor()
+
     cur.execute(
         """
         select tiktok_username
@@ -34,53 +32,14 @@ def load_creators():
           and creator_id <> ''
         """
     )
+
     rows = cur.fetchall()
     cur.close()
     conn.close()
+
     creators = [r[0] for r in rows]
     print(f"Loaded {len(creators)} creators")
     return creators
-
-
-def load_gift_lookup():
-    lookup = {}
-    try:
-        print("Loading gift images list…")
-        resp = requests.get(GIFT_API_URL, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-
-        if isinstance(data, dict):
-            items = data.get("gifts") or data.get("data") or []
-        elif isinstance(data, list):
-            items = data
-        else:
-            items = []
-
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-
-            name = item.get("name") or item.get("title") or item.get("gift_name")
-            if not name:
-                continue
-
-            image_url = (
-                item.get("image_url")
-                or item.get("image")
-                or item.get("icon")
-                or item.get("icon_url")
-            )
-
-            if image_url:
-                lookup[name.lower()] = image_url
-
-        print(f"Gift lookup loaded with {len(lookup)} images")
-
-    except Exception as e:
-        print("Failed to load gift image list:", e)
-
-    return lookup
 
 
 def log_gift_to_neon(
@@ -115,7 +74,7 @@ def log_gift_to_neon(
                 gift_name,
                 diamonds_per_item,
                 repeat_count,
-                total_diamonds
+                total_diamonds,
             ),
         )
 
@@ -125,6 +84,10 @@ def log_gift_to_neon(
 
     except Exception as e:
         print("Database insert error:", e)
+
+
+def format_number(n):
+    return f"{n:,}"
 
 
 def send_discord_alert(
@@ -138,128 +101,138 @@ def send_discord_alert(
     gift_image_url=None
 ):
     if not DISCORD_WEBHOOK_URL:
-        print("Webhook missing")
+        print("No webhook configured")
         return
 
-    diamonds_fmt = f"{diamonds_per_item:,}"
-    total_fmt = f"{total_diamonds:,}"
+    description_text = (
+        f"**{creator_username}** has just received a **{gift_name}**"
+    )
 
-    description_text = f"**{creator_username}** has just received a **{gift_name}**"
-
+    # Blue accent embed
     embed = {
         "title": "Gift Alert",
         "description": description_text,
-        "color": 65280,
+        "color": 3447003,  # Blue accent bar
         "fields": [
             {"name": "Creator", "value": creator_username, "inline": False},
             {"name": "From", "value": sender_username, "inline": False},
             {"name": "Display Name", "value": sender_display_name, "inline": False},
             {"name": "Gift", "value": gift_name, "inline": False},
-            {"name": "Diamonds", "value": diamonds_fmt, "inline": True},
-            {"name": "Count", "value": str(repeat_count), "inline": True},
-            {"name": "Total diamonds", "value": total_fmt, "inline": False}
-        ]
+            {
+                "name": "Diamonds",
+                "value": format_number(diamonds_per_item),
+                "inline": True,
+            },
+            {
+                "name": "Count",
+                "value": str(repeat_count),
+                "inline": True,
+            },
+            {
+                "name": "Total diamonds",
+                "value": format_number(total_diamonds),
+                "inline": False,
+            },
+        ],
     }
 
-    # Small gift icon top right
     if gift_image_url:
-        embed["author"] = {"name": " ", "icon_url": gift_image_url}
+        embed["thumbnail"] = {"url": gift_image_url}
 
     try:
         requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]})
-        print(f"Alert sent for {creator_username}: {gift_name} ({total_fmt})")
+        print("Discord alert sent")
     except Exception as e:
-        print("Alert send error:", e)
+        print("Discord error:", e)
+
+
+def get_gift_image(gift_name):
+    filename = gift_name.lower().strip().replace(" ", "_").replace("'", "")
+    url = f"{GITHUB_BASE}/{filename}.png"
+
+    test = requests.get(url)
+    if test.status_code == 200:
+        return url
+
+    return None
 
 
 async def run_listener_for_creator(creator_username):
-    global GIFT_LOOKUP
-
     while True:
         try:
-            print(f"Listener started: {creator_username}")
+            print(f"Starting listener for {creator_username}")
             client = TikTokLiveClient(unique_id=creator_username)
 
             @client.on(GiftEvent)
             async def on_gift(event: GiftEvent):
                 sender_username = event.user.unique_id
                 sender_display_name = event.user.nickname
+
                 gift_name = event.gift.name
 
-                # diamond extraction
-                if hasattr(event.gift, "diamond_count"):
-                    diamonds_per_item = event.gift.diamond_count
-                elif hasattr(event.gift, "diamond_value"):
-                    diamonds_per_item = event.gift.diamond_value
-                elif hasattr(event.gift, "info") and hasattr(event.gift.info, "diamond_count"):
-                    diamonds_per_item = event.gift.info.diamond_count
-                else:
-                    diamonds_per_item = 0
+                diamond_value = (
+                    getattr(event.gift, "diamond_count", None)
+                    or getattr(event.gift, "diamond_value", None)
+                    or 0
+                )
 
                 repeat_count = event.repeat_count
-                total_diamonds = diamonds_per_item * repeat_count
+                total_diamonds = diamond_value * repeat_count
 
-                # store in Neon
+                # Log every gift to Neon
                 log_gift_to_neon(
                     creator_username,
                     sender_username,
                     sender_display_name,
                     gift_name,
-                    diamonds_per_item,
+                    diamond_value,
                     repeat_count,
-                    total_diamonds
+                    total_diamonds,
                 )
 
-                # lookup gift image
-                gift_key = gift_name.lower().strip()
-                gift_image_url = GIFT_LOOKUP.get(gift_key)
-
+                # Send alerts only for large gifts
                 if total_diamonds >= DIAMOND_ALERT_THRESHOLD:
+                    gift_image = get_gift_image(gift_name)
+
                     send_discord_alert(
                         creator_username,
                         sender_username,
                         sender_display_name,
                         gift_name,
-                        diamonds_per_item,
+                        diamond_value,
                         repeat_count,
                         total_diamonds,
-                        gift_image_url
+                        gift_image_url=gift_image,
                     )
 
             await client.connect()
             await client.listen()
 
         except Exception as e:
-            message = str(e)
+            msg = str(e)
 
-            # Offline or TikTok error
-            offline_error = (
-                "UserNotFoundError" in message
-                or "SIGN_NOT_200" in message
-                or "Expecting value" in message
+            offline = (
+                "UserNotFoundError" in msg
+                or "Expecting value" in msg
+                or "SIGN_NOT_200" in msg
             )
 
-            if offline_error:
-                # quiet retry
+            if offline:
+                print(f"{creator_username} offline, retry in 1800 seconds")
                 await asyncio.sleep(1800)
             else:
-                print(f"Error for {creator_username}: {e}")
+                print(f"Error for {creator_username}: {e}, retry in 10 seconds")
                 await asyncio.sleep(10)
 
 
 async def main():
-    global GIFT_LOOKUP
-
-    GIFT_LOOKUP = load_gift_lookup()
     creators = load_creators()
 
-    if not creators:
-        print("No creators found")
-        return
+    tasks = [
+        asyncio.create_task(run_listener_for_creator(username))
+        for username in creators
+    ]
 
-    tasks = [asyncio.create_task(run_listener_for_creator(u)) for u in creators]
-
-    print(f"Started {len(tasks)} listeners")
     await asyncio.gather(*tasks)
 
 
