@@ -1,5 +1,5 @@
-from tiktoklive import TikTokLiveClient
-from tiktoklive.events import GiftEvent
+from TikTokLive import TikTokLiveClient
+from TikTokLive.events import GiftEvent
 
 # Temporary test creator (currently live)
 CREATOR_USERNAME = "joshbrissenden_"
