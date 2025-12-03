@@ -30,7 +30,7 @@ async def run_listener():
 
                 print("\n--- Gift Received ---")
                 print("Creator:", CREATOR_USERNAME)
-                print("From:", event.user.nickname)
+                print("From:", event.user.unique_id)
                 print("Gift:", event.gift.name)
                 print("Diamonds per item:", diamond_value)
                 print("Count:", event.repeat_count)
