@@ -3,7 +3,7 @@ from TikTokLive import TikTokLiveClient
 from TikTokLive.events import GiftEvent
 from TikTokLive.client.errors import UserNotFoundError
 
-CREATOR_USERNAME = "joshbrissenden_"
+CREATOR_USERNAME = "harryyoung_7"
 
 async def run_listener():
     while True:
