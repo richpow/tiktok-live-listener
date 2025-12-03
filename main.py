@@ -43,10 +43,6 @@ def load_creators():
 
 
 def load_gift_lookup():
-    """
-    Fetch gift data from StreamToEarn and build a name -> image url map.
-    Handles a few possible JSON shapes and missing keys safely.
-    """
     lookup = {}
     try:
         print("Fetching gift data from StreamToEarn")
@@ -54,7 +50,6 @@ def load_gift_lookup():
         resp.raise_for_status()
         data = resp.json()
 
-        # Some APIs use a top level list, some wrap in a 'gifts' or 'data' key
         if isinstance(data, dict):
             if "gifts" in data and isinstance(data["gifts"], list):
                 items = data["gifts"]
@@ -88,6 +83,7 @@ def load_gift_lookup():
                 count += 1
 
         print(f"Built gift lookup with {count} entries")
+
     except Exception as e:
         print("Failed to load gift lookup from StreamToEarn:", e)
 
@@ -175,7 +171,6 @@ def send_discord_alert(
         ]
     }
 
-    # Add thumbnail if we have an image url
     if gift_image_url:
         embed["thumbnail"] = {"url": gift_image_url}
 
@@ -200,7 +195,11 @@ async def run_listener_for_creator(creator_username):
             async def on_gift(event: GiftEvent):
                 sender_username = event.user.unique_id
                 sender_display_name = event.user.nickname
-                sender_level = event.user.level
+
+                sender_level = getattr(event.user, "level", None)
+                if sender_level is None:
+                    sender_level = "Unknown"
+
                 gift_name = event.gift.name
 
                 diamond_value = None
@@ -238,7 +237,6 @@ async def run_listener_for_creator(creator_username):
                     total_diamonds
                 )
 
-                # Look up image from StreamToEarn map
                 gift_key = gift_name.lower().strip()
                 gift_image_url = GIFT_LOOKUP.get(gift_key)
 
@@ -269,14 +267,12 @@ async def run_listener_for_creator(creator_username):
 
             if offline_like:
                 print(
-                    f"Creator {creator_username} probably not live or TikTok returned bad data. "
-                    f"Retrying this creator in 1800 seconds"
+                    f"Creator {creator_username} probably not live or TikTok returned bad data. Retrying this creator in 1800 seconds"
                 )
                 await asyncio.sleep(1800)
             else:
                 print(
-                    f"Error in listener for {creator_username}: {e}. "
-                    f"Restarting this creator in 10 seconds"
+                    f"Error in listener for {creator_username}: {e}. Restarting this creator in 10 seconds"
                 )
                 await asyncio.sleep(10)
 
@@ -284,7 +280,6 @@ async def run_listener_for_creator(creator_username):
 async def main():
     global GIFT_LOOKUP
 
-    # Load gift images once at startup
     GIFT_LOOKUP = load_gift_lookup()
 
     creators = load_creators()
