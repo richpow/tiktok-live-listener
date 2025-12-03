@@ -3,7 +3,6 @@ from TikTokLive import TikTokLiveClient
 from TikTokLive.events import GiftEvent
 from TikTokLive.client.errors import UserNotFoundError
 
-# Temporary test creator
 CREATOR_USERNAME = "joshbrissenden_"
 
 async def run_listener():
@@ -16,7 +15,7 @@ async def run_listener():
             @client.on(GiftEvent)
             async def on_gift(event: GiftEvent):
                 diamond_value = event.gift.info.diamond_count
-                total_diamonds = diamond_value * event.repeat_count
+                total = diamond_value * event.repeat_count
 
                 print("\n--- Gift Received ---")
                 print("Creator:", CREATOR_USERNAME)
@@ -24,17 +23,16 @@ async def run_listener():
                 print("Gift:", event.gift.name)
                 print("Diamonds per item:", diamond_value)
                 print("Count:", event.repeat_count)
-                print("Total diamonds:", total_diamonds)
+                print("Total diamonds:", total)
                 print("----------------------\n")
 
-            await client._connect()   # Low-level connect
-            await client._join_room() # Join live feed
-
+            # Connect and listen using TikTokLive's supported methods
+            await client.connect()
             print("Connected. Listening for gifts...")
-            await client._listen()    # Start receiving events
+            await client.listen()
 
         except UserNotFoundError:
-            print("UserNotFoundError: TikTok returned invalid data. Retrying in 10 seconds...")
+            print("UserNotFoundError: Retrying in 10 seconds...")
             await asyncio.sleep(10)
 
         except Exception as e:
