@@ -1,2 +1,2 @@
-TikTokLive
+TikTokLive>=6.7.4
 aiohttp
