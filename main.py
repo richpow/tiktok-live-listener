@@ -214,7 +214,7 @@ async def run_listener_for_creator(creator_username):
             )
 
             if offline:
-                print(f"{creator_username} offline, retry in 600 seconds")
+                print(f"{creator_username} offline, retry in 1200 seconds")
                 await asyncio.sleep(1800)
             else:
                 print(f"Error for {creator_username}: {e}, retry in 10 seconds")
