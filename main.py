@@ -8,9 +8,9 @@ from TikTokLive.events import GiftEvent
 DATABASE_URL = os.getenv("DATABASE_URL")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
-DIAMOND_ALERT_THRESHOLD = 3000
+DIAMOND_ALERT_THRESHOLD = 4999
 
-# Your GitHub raw base path
+# GitHub raw folder
 GITHUB_BASE = "https://raw.githubusercontent.com/richpow/tiktok-live-listener/main/gifts"
 
 
@@ -90,6 +90,15 @@ def format_number(n):
     return f"{n:,}"
 
 
+def build_gift_image_url(gift_name):
+    key = gift_name.lower().strip().replace(" ", "_").replace("'", "")
+    url = f"{GITHUB_BASE}/{key}.png"
+    check = requests.get(url)
+    if check.status_code == 200:
+        return url
+    return None
+
+
 def send_discord_alert(
     creator_username,
     sender_username,
@@ -104,57 +113,44 @@ def send_discord_alert(
         print("No webhook configured")
         return
 
+    # Compact title line
     description_text = (
-        f"**{creator_username}** has just received a **{gift_name}**"
+        f"**{creator_username}** has just received a **{gift_name}** from **{sender_username}**"
     )
 
-    # Blue accent embed
     embed = {
         "title": "Gift Alert",
         "description": description_text,
-        "color": 3447003,  # Blue accent bar
+        "color": 3447003,  # blue accent bar
         "fields": [
-            {"name": "Creator", "value": creator_username, "inline": False},
-            {"name": "From", "value": sender_username, "inline": False},
-            {"name": "Display Name", "value": sender_display_name, "inline": False},
-            {"name": "Gift", "value": gift_name, "inline": False},
+            {
+                "name": "Creator",
+                "value": creator_username,
+                "inline": True
+            },
+            {
+                "name": "Sent By",
+                "value": f"{sender_username} | {sender_display_name}",
+                "inline": True
+            },
             {
                 "name": "Diamonds",
-                "value": format_number(diamonds_per_item),
-                "inline": True,
-            },
-            {
-                "name": "Count",
-                "value": str(repeat_count),
-                "inline": True,
-            },
-            {
-                "name": "Total diamonds",
                 "value": format_number(total_diamonds),
-                "inline": False,
-            },
-        ],
+                "inline": False
+            }
+        ]
     }
 
+    # Right aligned small icon
     if gift_image_url:
         embed["thumbnail"] = {"url": gift_image_url}
 
     try:
         requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]})
         print("Discord alert sent")
+
     except Exception as e:
         print("Discord error:", e)
-
-
-def get_gift_image(gift_name):
-    filename = gift_name.lower().strip().replace(" ", "_").replace("'", "")
-    url = f"{GITHUB_BASE}/{filename}.png"
-
-    test = requests.get(url)
-    if test.status_code == 200:
-        return url
-
-    return None
 
 
 async def run_listener_for_creator(creator_username):
@@ -179,7 +175,7 @@ async def run_listener_for_creator(creator_username):
                 repeat_count = event.repeat_count
                 total_diamonds = diamond_value * repeat_count
 
-                # Log every gift to Neon
+                # Always log
                 log_gift_to_neon(
                     creator_username,
                     sender_username,
@@ -190,9 +186,9 @@ async def run_listener_for_creator(creator_username):
                     total_diamonds,
                 )
 
-                # Send alerts only for large gifts
+                # Alerts only for threshold
                 if total_diamonds >= DIAMOND_ALERT_THRESHOLD:
-                    gift_image = get_gift_image(gift_name)
+                    gift_image = build_gift_image_url(gift_name)
 
                     send_discord_alert(
                         creator_username,
