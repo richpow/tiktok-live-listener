@@ -147,9 +147,6 @@ async def start_listener_for_creator(creator_username: str):
     except:
         pass
 
-    ACTIVE_CLIENTS[creator_username] = client
-    print(f"Started recording gifts for {creator_username}")
-
     @client.on(GiftEvent)
     async def on_gift(event: GiftEvent):
         sender_username = event.user.unique_id
@@ -190,13 +187,22 @@ async def start_listener_for_creator(creator_username: str):
 
     async def runner():
         try:
+            # Connect first so we only log "Started" if this succeeds
             await client.connect()
+
+            # At this point the user is definitely live
+            ACTIVE_CLIENTS[creator_username] = client
+            print(f"Started recording gifts for {creator_username}")
+
             await client.listen()
+
         except:
             pass
+
         finally:
-            ACTIVE_CLIENTS.pop(creator_username, None)
-            print(f"Stopped recording gifts for {creator_username}, user is now offline")
+            if creator_username in ACTIVE_CLIENTS:
+                ACTIVE_CLIENTS.pop(creator_username, None)
+                print(f"Stopped recording gifts for {creator_username}, user is now offline")
 
     asyncio.create_task(runner())
 
