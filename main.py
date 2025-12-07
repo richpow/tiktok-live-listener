@@ -95,11 +95,11 @@ def build_gift_image_url(gift_name):
     key = gift_name.lower().strip().replace(" ", "_").replace("'", "")
     url = f"{GITHUB_BASE}/{key}.png"
     try:
-        check = requests.get(url, timeout=3)
-        if check.status_code == 200:
+        resp = requests.get(url, timeout=3)
+        if resp.status_code == 200:
             return url
     except:
-        return None
+        pass
     return None
 
 
@@ -137,6 +137,10 @@ def send_discord_alert(
 
 
 async def start_listener_for_creator(creator_username: str):
+    """
+    Start a TikTokLiveClient listener for a confirmed live creator.
+    Keeps running until the stream ends.
+    """
     if creator_username in ACTIVE_CLIENTS:
         return
 
@@ -147,7 +151,7 @@ async def start_listener_for_creator(creator_username: str):
     except:
         pass
 
-    # Register client immediately so ACTIVE_CLIENTS is always accurate
+    # Register immediately so ACTIVE_CLIENTS stays consistent
     ACTIVE_CLIENTS[creator_username] = client
     print(f"Started recording gifts for {creator_username}")
     print(f"Currently recording gifts for {len(ACTIVE_CLIENTS)} users live right now")
@@ -191,10 +195,14 @@ async def start_listener_for_creator(creator_username: str):
 
     async def runner():
         try:
+            # These MUST be awaited
             await client.connect()
             await client.run()
-        except:
+
+        except Exception as e:
+            # Listener ended due to error or disconnect
             pass
+
         finally:
             if creator_username in ACTIVE_CLIENTS:
                 ACTIVE_CLIENTS.pop(creator_username, None)
@@ -205,13 +213,18 @@ async def start_listener_for_creator(creator_username: str):
 
 
 async def scan_creators_loop(creators):
+    """
+    Continuously scans creators to detect who goes live.
+    """
     while True:
         for username in creators:
 
+            # Skip already active listeners
             if username in ACTIVE_CLIENTS:
                 await asyncio.sleep(SCAN_DELAY_BETWEEN_CREATORS)
                 continue
 
+            # Lightweight probe
             try:
                 probe = TikTokLiveClient(unique_id=username)
 
