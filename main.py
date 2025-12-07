@@ -3,18 +3,22 @@ import asyncio
 import psycopg2
 import requests
 from TikTokLive import TikTokLiveClient
-from TikTokLive.events import GiftEvent, ConnectEvent, DisconnectEvent
+from TikTokLive.events import GiftEvent
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 DIAMOND_ALERT_THRESHOLD = 4999
+
+# GitHub raw folder
 GITHUB_BASE = "https://raw.githubusercontent.com/richpow/tiktok-live-listener/main/gifts"
 
-ACTIVE_LISTENERS = {}
-SCAN_INDEX = 0
-WINDOW_SIZE = 100
-SCAN_INTERVAL = 5
+# How aggressive the scanner is
+SCAN_DELAY_BETWEEN_CREATORS = 0.2      # seconds between checks of individual users
+SCAN_SLEEP_BETWEEN_FULL_PASSES = 10    # pause after a full pass over all creators
+
+# Active live listeners
+ACTIVE_CLIENTS = {}  # username -> TikTokLiveClient
 
 
 def get_db():
@@ -24,6 +28,7 @@ def get_db():
 def load_creators():
     conn = get_db()
     cur = conn.cursor()
+
     cur.execute(
         """
         select tiktok_username
@@ -34,13 +39,17 @@ def load_creators():
           and creator_id <> ''
         """
     )
+
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return [r[0] for r in rows]
+
+    creators = [r[0] for r in rows]
+    print(f"Loaded {len(creators)} creators")
+    return creators
 
 
-def log_gift(
+def log_gift_to_neon(
     creator_username,
     sender_username,
     sender_display_name,
@@ -52,6 +61,7 @@ def log_gift(
     try:
         conn = get_db()
         cur = conn.cursor()
+
         cur.execute(
             """
             insert into fasttrack_live_gifts
@@ -74,18 +84,29 @@ def log_gift(
                 total_diamonds,
             ),
         )
+
         conn.commit()
         cur.close()
         conn.close()
+
     except Exception as e:
-        print("DB error", e)
+        print("Database insert error:", e)
 
 
-def build_gift_image_url(name):
-    key = name.lower().strip().replace(" ", "_").replace("'", "")
+def format_number(n):
+    return f"{n:,}"
+
+
+def build_gift_image_url(gift_name):
+    key = gift_name.lower().strip().replace(" ", "_").replace("'", "")
     url = f"{GITHUB_BASE}/{key}.png"
-    r = requests.get(url)
-    return url if r.status_code == 200 else None
+    try:
+        check = requests.get(url, timeout=3)
+        if check.status_code == 200:
+            return url
+    except Exception as e:
+        print("Gift image fetch error:", e)
+    return None
 
 
 def send_discord_alert(
@@ -95,120 +116,174 @@ def send_discord_alert(
     gift_name,
     diamonds_per_item,
     repeat_count,
-    total
+    total_diamonds,
+    gift_image_url=None
 ):
     if not DISCORD_WEBHOOK_URL:
         return
 
-    image = build_gift_image_url(gift_name)
+    description_text = (
+        f"**{creator_username}** has just received a **{gift_name}** from **{sender_username}**"
+    )
 
     embed = {
         "title": "Gift Alert",
-        "description": f"{creator_username} received {gift_name} from {sender_username}",
+        "description": description_text,
         "color": 3447003,
         "fields": [
-            {"name": "Creator", "value": creator_username, "inline": True},
             {
-                "name": "Sender",
-                "value": f"{sender_username} | {sender_display_name}",
-                "inline": True,
+                "name": "Creator",
+                "value": creator_username,
+                "inline": True
             },
-            {"name": "Diamonds", "value": f"{total:,}", "inline": False},
-        ],
+            {
+                "name": "Sent By",
+                "value": f"{sender_username} | {sender_display_name}",
+                "inline": True
+            },
+            {
+                "name": "Diamonds",
+                "value": format_number(total_diamonds),
+                "inline": False
+            }
+        ]
     }
 
-    if image:
-        embed["thumbnail"] = {"url": image}
+    if gift_image_url:
+        embed["thumbnail"] = {"url": gift_image_url}
 
     try:
-        requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]})
+        requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}, timeout=3)
     except Exception as e:
-        print("Discord error", e)
+        print("Discord error:", e)
 
 
-async def start_listener(username):
-    if username in ACTIVE_LISTENERS:
-        return
+async def start_listener_for_creator(creator_username: str):
+    """
+    Start a long lived TikTokLiveClient for a creator that is confirmed live.
+    This keeps running until the live ends or an error disconnects the client.
+    """
+    if creator_username in ACTIVE_CLIENTS:
+        return  # already listening
 
-    client = TikTokLiveClient(unique_id=username)
-    ACTIVE_LISTENERS[username] = client
+    client = TikTokLiveClient(unique_id=creator_username)
+
+    # Keep library logs quiet to avoid Railway log spam
+    try:
+        client.logger.setLevel("WARNING")
+    except Exception:
+        pass
+
+    ACTIVE_CLIENTS[creator_username] = client
+    print(f"Started live listener for {creator_username}")
 
     @client.on(GiftEvent)
-    async def on_gift(event):
+    async def on_gift(event: GiftEvent):
         sender_username = event.user.unique_id
         sender_display_name = event.user.nickname
         gift_name = event.gift.name
-        diamonds = getattr(event.gift, "diamond_count", 0)
-        count = event.repeat_count
-        total = diamonds * count
 
-        log_gift(
-            username,
+        diamond_value = (
+            getattr(event.gift, "diamond_count", None)
+            or getattr(event.gift, "diamond_value", None)
+            or 0
+        )
+
+        repeat_count = event.repeat_count
+        total_diamonds = diamond_value * repeat_count
+
+        # Always log to Neon
+        log_gift_to_neon(
+            creator_username,
             sender_username,
             sender_display_name,
             gift_name,
-            diamonds,
-            count,
-            total,
+            diamond_value,
+            repeat_count,
+            total_diamonds,
         )
 
-        if total >= DIAMOND_ALERT_THRESHOLD:
+        # Send Discord alert only for bigger gifts
+        if total_diamonds >= DIAMOND_ALERT_THRESHOLD:
+            gift_image = build_gift_image_url(gift_name)
             send_discord_alert(
-                username,
+                creator_username,
                 sender_username,
                 sender_display_name,
                 gift_name,
-                diamonds,
-                count,
-                total,
+                diamond_value,
+                repeat_count,
+                total_diamonds,
+                gift_image_url=gift_image,
             )
 
-    @client.on(DisconnectEvent)
-    async def on_disconnect(_):
-        if username in ACTIVE_LISTENERS:
-            del ACTIVE_LISTENERS[username]
+    async def runner():
+        try:
+            await client.connect()
+            await client.listen()
+        except Exception as e:
+            print(f"Listener error for {creator_username}: {e}")
+        finally:
+            # Remove from active when live ends or fails
+            ACTIVE_CLIENTS.pop(creator_username, None)
+            print(f"Stopped live listener for {creator_username}")
 
-    try:
-        await client.connect()
-        asyncio.create_task(client.listen())
-    except Exception as e:
-        if username in ACTIVE_LISTENERS:
-            del ACTIVE_LISTENERS[username]
+    # Fire and forget
+    asyncio.create_task(runner())
 
 
-async def scan_creators(creators):
-    global SCAN_INDEX
-
-    total = len(creators)
-
+async def scan_creators_loop(creators):
+    """
+    Loop forever:
+      iterate over all creators
+      skip anyone already being listened to
+      use is_live to see who just went live
+      start a listener for them
+    """
     while True:
-        start = SCAN_INDEX
-        end = min(SCAN_INDEX + WINDOW_SIZE, total)
-        batch = creators[start:end]
-
-        for username in batch:
-            if username in ACTIVE_LISTENERS:
+        for username in creators:
+            # If we are already tracking this creator while they are live, skip
+            if username in ACTIVE_CLIENTS:
+                await asyncio.sleep(SCAN_DELAY_BETWEEN_CREATORS)
                 continue
 
             try:
-                probe = TikTokLiveClient(unique_id=username)
-                info = await probe.get_room_info()
-                if info.get("status") == 1:
-                    print(f"{username} is live, starting listener")
-                    await start_listener(username)
-            except Exception:
-                pass
+                # Lightweight check, much cheaper than full websocket
+                probe_client = TikTokLiveClient(unique_id=username)
 
-        SCAN_INDEX = end if end < total else 0
-        await asyncio.sleep(SCAN_INTERVAL)
+                try:
+                    # Keep logs low on the probe client as well
+                    try:
+                        probe_client.logger.setLevel("WARNING")
+                    except Exception:
+                        pass
+
+                    is_live = await probe_client.is_live()
+                finally:
+                    # Close underlying HTTP client if possible
+                    try:
+                        await probe_client.disconnect()
+                    except Exception:
+                        pass
+
+                if is_live:
+                    await start_listener_for_creator(username)
+
+            except Exception as e:
+                # Silent for most errors, only print if interesting
+                print(f"Scan error for {username}: {e}")
+
+            # Small pause between checks to avoid hammering TikTok and Railway
+            await asyncio.sleep(SCAN_DELAY_BETWEEN_CREATORS)
+
+        # Short pause after a full pass
+        await asyncio.sleep(SCAN_SLEEP_BETWEEN_FULL_PASSES)
 
 
 async def main():
     creators = load_creators()
-    print(f"Loaded {len(creators)} creators")
-    asyncio.create_task(scan_creators(creators))
-    while True:
-        await asyncio.sleep(60)
+    # Single scanner loop, individual live listeners spin off as needed
+    await scan_creators_loop(creators)
 
 
 if __name__ == "__main__":
