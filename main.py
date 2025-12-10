@@ -8,7 +8,7 @@ from TikTokLive.events import GiftEvent
 DATABASE_URL = os.getenv("DATABASE_URL")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
-DIAMOND_ALERT_THRESHOLD = 4999
+DIAMOND_ALERT_THRESHOLD = 9999
 
 GITHUB_BASE = "https://raw.githubusercontent.com/richpow/tiktok-live-listener/main/gifts"
 
