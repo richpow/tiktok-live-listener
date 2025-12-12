@@ -1,5 +1,6 @@
 import os
 import asyncio
+import time
 import psycopg2
 import requests
 from TikTokLive import TikTokLiveClient
@@ -9,13 +10,22 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 DIAMOND_ALERT_THRESHOLD = 9999
-
 GITHUB_BASE = "https://raw.githubusercontent.com/richpow/tiktok-live-listener/main/gifts"
 
 SCAN_DELAY_BETWEEN_CREATORS = 0.2
 SCAN_SLEEP_BETWEEN_FULL_PASSES = 10
 
+MAX_RUNTIME_SECONDS = 60 * 60 * 3
+STALL_TIMEOUT_SECONDS = 60 * 8
+
 ACTIVE_CLIENTS = {}
+SERVICE_START_TIME = time.time()
+LAST_ACTIVITY_TIME = time.time()
+
+
+def touch_activity():
+    global LAST_ACTIVITY_TIME
+    LAST_ACTIVITY_TIME = time.time()
 
 
 def get_db():
@@ -25,7 +35,6 @@ def get_db():
 def load_creators():
     conn = get_db()
     cur = conn.cursor()
-
     cur.execute(
         """
         select tiktok_username
@@ -36,11 +45,9 @@ def load_creators():
           and creator_id <> ''
         """
     )
-
     rows = cur.fetchall()
     cur.close()
     conn.close()
-
     creators = [r[0] for r in rows]
     print(f"Loaded {len(creators)} creators")
     return creators
@@ -87,10 +94,6 @@ def log_gift_to_neon(
         pass
 
 
-def format_number(n):
-    return f"{n:,}"
-
-
 def build_gift_image_url(gift_name):
     key = gift_name.lower().strip().replace(" ", "_").replace("'", "")
     url = f"{GITHUB_BASE}/{key}.png"
@@ -123,7 +126,7 @@ def send_discord_alert(
         "fields": [
             {"name": "Creator", "value": creator_username, "inline": True},
             {"name": "Sent By", "value": f"{sender_username} | {sender_display_name}", "inline": True},
-            {"name": "Diamonds", "value": format_number(total_diamonds)},
+            {"name": "Diamonds", "value": f"{total_diamonds:,}"},
         ],
     }
 
@@ -136,28 +139,20 @@ def send_discord_alert(
         pass
 
 
-async def start_listener_for_creator(creator_username: str):
-    """
-    Start a TikTokLiveClient listener for a confirmed live creator.
-    Keeps running until the stream ends.
-    """
+async def start_listener_for_creator(creator_username):
     if creator_username in ACTIVE_CLIENTS:
         return
 
     client = TikTokLiveClient(unique_id=creator_username)
-
-    try:
-        client.logger.setLevel("WARNING")
-    except:
-        pass
-
-    # Register immediately so ACTIVE_CLIENTS stays consistent
     ACTIVE_CLIENTS[creator_username] = client
-    print(f"Started recording gifts for {creator_username}")
-    print(f"Currently recording gifts for {len(ACTIVE_CLIENTS)} users live right now")
+
+    print(f"Started listener for {creator_username}")
+    print(f"Active listeners {len(ACTIVE_CLIENTS)}")
 
     @client.on(GiftEvent)
-    async def on_gift(event: GiftEvent):
+    async def on_gift(event):
+        touch_activity()
+
         sender_username = event.user.unique_id
         sender_display_name = event.user.nickname
         gift_name = event.gift.name
@@ -195,52 +190,35 @@ async def start_listener_for_creator(creator_username: str):
 
     async def runner():
         try:
-            # These MUST be awaited
             await client.connect()
-            await client.run()
-
-        except Exception as e:
-            # Listener ended due to error or disconnect
+            await asyncio.wait_for(client.run(), timeout=MAX_RUNTIME_SECONDS)
+        except:
             pass
-
         finally:
-            if creator_username in ACTIVE_CLIENTS:
-                ACTIVE_CLIENTS.pop(creator_username, None)
-                print(f"Stopped recording gifts for {creator_username}, user is now offline")
-                print(f"Currently recording gifts for {len(ACTIVE_CLIENTS)} users live right now")
+            ACTIVE_CLIENTS.pop(creator_username, None)
+            print(f"Stopped listener for {creator_username}")
+            print(f"Active listeners {len(ACTIVE_CLIENTS)}")
 
     asyncio.create_task(runner())
 
 
 async def scan_creators_loop(creators):
-    """
-    Continuously scans creators to detect who goes live.
-    """
     while True:
         for username in creators:
-
-            # Skip already active listeners
             if username in ACTIVE_CLIENTS:
                 await asyncio.sleep(SCAN_DELAY_BETWEEN_CREATORS)
                 continue
 
-            # Lightweight probe
             try:
                 probe = TikTokLiveClient(unique_id=username)
-
-                try:
-                    probe.logger.setLevel("WARNING")
-                except:
-                    pass
-
-                is_live = await probe.is_live()
-
+                is_live = await asyncio.wait_for(probe.is_live(), timeout=5)
                 try:
                     await probe.disconnect()
                 except:
                     pass
 
                 if is_live:
+                    touch_activity()
                     await start_listener_for_creator(username)
 
             except:
@@ -251,9 +229,28 @@ async def scan_creators_loop(creators):
         await asyncio.sleep(SCAN_SLEEP_BETWEEN_FULL_PASSES)
 
 
+async def watchdog_loop():
+    while True:
+        await asyncio.sleep(30)
+
+        runtime = time.time() - SERVICE_START_TIME
+        inactivity = time.time() - LAST_ACTIVITY_TIME
+
+        if runtime > MAX_RUNTIME_SECONDS:
+            print("Max runtime reached, exiting for redeploy")
+            os._exit(1)
+
+        if inactivity > STALL_TIMEOUT_SECONDS:
+            print("No activity detected, exiting for restart")
+            os._exit(1)
+
+
 async def main():
     creators = load_creators()
-    await scan_creators_loop(creators)
+    await asyncio.gather(
+        scan_creators_loop(creators),
+        watchdog_loop(),
+    )
 
 
 if __name__ == "__main__":
