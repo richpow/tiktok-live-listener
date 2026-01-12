@@ -35,7 +35,7 @@ DEBUG_LISTENERS = os.getenv("DEBUG_LISTENERS", "false").strip().lower() in {"1",
 
 
 # =========================
-# Logging, Railway safe
+# Logging (Railway safe)
 # =========================
 
 logging.basicConfig(
@@ -131,6 +131,24 @@ class GiftListenerService:
                 pass
 
 
+    # =========================
+    # Live detection (FIXED)
+    # =========================
+    async def is_live(self, username: str) -> bool:
+        async with self.probe_sem:
+            client = TikTokLiveClient(unique_id=username)
+            try:
+                await asyncio.wait_for(client.connect(), timeout=PROBE_TIMEOUT)
+                return client.room_id is not None
+            except Exception:
+                return False
+            finally:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+
+
     async def scan_loop(self):
         while True:
             for username in self.creators:
@@ -148,20 +166,6 @@ class GiftListenerService:
                 await asyncio.sleep(SCAN_DELAY_BETWEEN_CREATORS)
 
             await asyncio.sleep(SCAN_SLEEP_BETWEEN_PASSES)
-
-
-    async def is_live(self, username: str) -> bool:
-        async with self.probe_sem:
-            client = TikTokLiveClient(unique_id=username)
-            try:
-                return await asyncio.wait_for(client.is_live(), timeout=PROBE_TIMEOUT)
-            except Exception:
-                return False
-            finally:
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
 
 
     async def listener_loop(self, state: CreatorState):
@@ -224,7 +228,6 @@ class GiftListenerService:
             idle_task = asyncio.create_task(idle_watch())
 
             try:
-                # IMPORTANT: run() manages connect internally
                 await client.run()
             except Exception:
                 pass
@@ -241,13 +244,13 @@ class GiftListenerService:
 
     async def log_gift(
         self,
-        creator: str,
-        sender: str,
-        sender_name: str,
-        gift: str,
-        per_item: int,
-        count: int,
-        total: int,
+        creator,
+        sender,
+        sender_name,
+        gift,
+        per_item,
+        count,
+        total,
     ):
         try:
             await self.pool.execute(
@@ -276,12 +279,12 @@ class GiftListenerService:
 
     async def send_discord(
         self,
-        creator: str,
-        sender: str,
-        sender_name: str,
-        gift: str,
-        diamonds: int,
-        gift_image_url: Optional[str],
+        creator,
+        sender,
+        sender_name,
+        gift,
+        diamonds,
+        gift_image_url,
     ):
         if not DISCORD_WEBHOOK_URL:
             return
