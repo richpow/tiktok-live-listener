@@ -31,7 +31,6 @@ CREATOR_REFRESH_SECONDS = int(os.getenv("CREATOR_REFRESH_SECONDS", "600"))
 
 STATUS_LOG_SECONDS = int(os.getenv("STATUS_LOG_SECONDS", "300"))
 
-# Optional, keep default false to protect Railway log limits
 DEBUG_LISTENERS = os.getenv("DEBUG_LISTENERS", "false").strip().lower() in {"1", "true", "yes"}
 
 
@@ -44,7 +43,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 
-# Silence noisy libraries
 logging.getLogger("TikTokLive").setLevel(logging.ERROR)
 logging.getLogger("aiohttp").setLevel(logging.ERROR)
 logging.getLogger("httpx").setLevel(logging.ERROR)
@@ -226,8 +224,7 @@ class GiftListenerService:
             idle_task = asyncio.create_task(idle_watch())
 
             try:
-                # Correct TikTokLive lifecycle for event stream
-                await client.connect()
+                # IMPORTANT: run() manages connect internally
                 await client.run()
             except Exception:
                 pass
