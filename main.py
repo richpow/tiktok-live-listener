@@ -17,10 +17,7 @@ from TikTokLive.events import GiftEvent
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
-
 DIAMOND_ALERT_THRESHOLD = int(os.getenv("DIAMOND_ALERT_THRESHOLD", "9999"))
-
-GITHUB_BASE = "https://raw.githubusercontent.com/richpow/tiktok-live-listener/main/gifts"
 
 SCAN_DELAY_BETWEEN_CREATORS = float(os.getenv("SCAN_DELAY_BETWEEN_CREATORS", "0.4"))
 SCAN_SLEEP_BETWEEN_PASSES = float(os.getenv("SCAN_SLEEP_BETWEEN_PASSES", "12"))
@@ -33,7 +30,7 @@ CREATOR_REFRESH_SECONDS = int(os.getenv("CREATOR_REFRESH_SECONDS", "600"))
 
 
 # =========================
-# Logging (quiet + safe)
+# Logging
 # =========================
 
 logging.basicConfig(
@@ -42,7 +39,6 @@ logging.basicConfig(
 )
 
 logging.getLogger("TikTokLive").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("aiohttp").setLevel(logging.WARNING)
 
 log = logging.getLogger("listener")
@@ -79,7 +75,6 @@ class GiftListenerService:
         self.probe_sem = asyncio.Semaphore(MAX_PROBE_CONCURRENCY)
 
 
-    # -------------------------
     async def start(self):
         self.pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=8)
         self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8))
@@ -106,7 +101,6 @@ class GiftListenerService:
             await self.pool.close()
 
 
-    # -------------------------
     async def refresh_creators(self):
         rows = await self.pool.fetch(
             """
@@ -131,7 +125,6 @@ class GiftListenerService:
                 log.warning("Creator refresh failed: %s", e)
 
 
-    # -------------------------
     async def scan_loop(self):
         while True:
             for username in self.creators:
@@ -165,7 +158,6 @@ class GiftListenerService:
                     pass
 
 
-    # -------------------------
     async def listener_loop(self, state: CreatorState):
         username = state.username
         log.info("▶ Listening: %s", username)
@@ -183,11 +175,19 @@ class GiftListenerService:
                 )
                 total = diamonds * event.repeat_count
 
+                gift_name = event.gift.name
+                gift_image_url = None
+
+                if hasattr(event.gift, "image") and event.gift.image:
+                    urls = getattr(event.gift.image, "url_list", [])
+                    if urls:
+                        gift_image_url = urls[0]
+
                 await self.log_gift(
                     username,
                     event.user.unique_id,
                     event.user.nickname,
-                    event.gift.name,
+                    gift_name,
                     diamonds,
                     event.repeat_count,
                     total,
@@ -198,8 +198,9 @@ class GiftListenerService:
                         username,
                         event.user.unique_id,
                         event.user.nickname,
-                        event.gift.name,
+                        gift_name,
                         total,
+                        gift_image_url,
                     )
 
             async def idle_watch():
@@ -229,7 +230,6 @@ class GiftListenerService:
         log.info("■ Stopped: %s", username)
 
 
-    # -------------------------
     async def log_gift(
         self,
         creator,
@@ -272,6 +272,7 @@ class GiftListenerService:
         sender_name,
         gift,
         diamonds,
+        gift_image_url,
     ):
         if not DISCORD_WEBHOOK_URL:
             return
@@ -285,13 +286,15 @@ class GiftListenerService:
             ],
         }
 
+        if gift_image_url:
+            embed["thumbnail"] = {"url": gift_image_url}
+
         try:
             await self.http.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]})
         except Exception:
             pass
 
 
-    # -------------------------
     async def status_loop(self):
         while True:
             await asyncio.sleep(120)
