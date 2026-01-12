@@ -30,19 +30,19 @@ CREATOR_REFRESH_SECONDS = int(os.getenv("CREATOR_REFRESH_SECONDS", "600"))
 
 
 # =========================
-# Logging (Railway-safe)
+# Logging (STRICT)
 # =========================
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # <-- important
     format="%(asctime)s %(levelname)s %(message)s",
 )
 
-# Silence noisy libraries completely
-logging.getLogger("TikTokLive").setLevel(logging.WARNING)
-logging.getLogger("aiohttp").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("asyncio").setLevel(logging.WARNING)
+# Kill noisy libraries completely
+logging.getLogger("TikTokLive").setLevel(logging.ERROR)
+logging.getLogger("aiohttp").setLevel(logging.ERROR)
+logging.getLogger("httpx").setLevel(logging.ERROR)
+logging.getLogger("asyncio").setLevel(logging.ERROR)
 
 log = logging.getLogger("listener")
 
@@ -80,10 +80,7 @@ class GiftListenerService:
 
     async def start(self):
         self.pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=8)
-        self.http = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=8),
-            raise_for_status=False,
-        )
+        self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8))
 
         await self.refresh_creators()
 
@@ -107,7 +104,6 @@ class GiftListenerService:
             await self.pool.close()
 
 
-    # -------------------------
     async def refresh_creators(self):
         rows = await self.pool.fetch(
             """
@@ -120,7 +116,9 @@ class GiftListenerService:
             """
         )
         self.creators = [r["tiktok_username"] for r in rows]
-        log.info("Loaded %s creators", len(self.creators))
+
+        # ONE startup log only
+        logging.warning("Loaded %s creators", len(self.creators))
 
 
     async def creator_refresh_loop(self):
@@ -128,11 +126,10 @@ class GiftListenerService:
             await asyncio.sleep(CREATOR_REFRESH_SECONDS)
             try:
                 await self.refresh_creators()
-            except Exception as e:
-                log.warning("Creator refresh failed: %s", e)
+            except Exception:
+                pass
 
 
-    # -------------------------
     async def scan_loop(self):
         while True:
             for username in self.creators:
@@ -166,10 +163,8 @@ class GiftListenerService:
                     pass
 
 
-    # -------------------------
     async def listener_loop(self, state: CreatorState):
         username = state.username
-        log.info("▶ Listening: %s", username)
 
         while not state.stopping:
             client = TikTokLiveClient(unique_id=username)
@@ -184,10 +179,8 @@ class GiftListenerService:
                 )
                 total = diamonds * event.repeat_count
 
-                gift_name = event.gift.name
                 gift_image_url = None
-
-                if hasattr(event.gift, "image") and event.gift.image:
+                if getattr(event.gift, "image", None):
                     urls = getattr(event.gift.image, "url_list", [])
                     if urls:
                         gift_image_url = urls[0]
@@ -196,7 +189,7 @@ class GiftListenerService:
                     username,
                     event.user.unique_id,
                     event.user.nickname,
-                    gift_name,
+                    event.gift.name,
                     diamonds,
                     event.repeat_count,
                     total,
@@ -207,7 +200,7 @@ class GiftListenerService:
                         username,
                         event.user.unique_id,
                         event.user.nickname,
-                        gift_name,
+                        event.gift.name,
                         total,
                         gift_image_url,
                     )
@@ -216,30 +209,26 @@ class GiftListenerService:
                 while True:
                     await asyncio.sleep(30)
                     if time.time() - state.last_event > IDLE_RECONNECT_SECONDS:
-                        await client.disconnect()
+                        await client.stop()
                         return
 
             idle_task = asyncio.create_task(idle_watch())
 
             try:
-                await client.connect()
-                await client.run()
+                await client.start()  # <-- FIXED coroutine usage
             except Exception:
                 pass
             finally:
                 idle_task.cancel()
                 try:
-                    await client.disconnect()
+                    await client.stop()
                 except Exception:
                     pass
 
                 if not state.stopping:
                     await asyncio.sleep(5)
 
-        log.info("■ Stopped: %s", username)
 
-
-    # -------------------------
     async def log_gift(
         self,
         creator,
@@ -305,15 +294,14 @@ class GiftListenerService:
             pass
 
 
-    # -------------------------
     async def status_loop(self):
         while True:
             await asyncio.sleep(300)
-            active = [
-                u for u, s in self.states.items()
+            active = sum(
+                1 for s in self.states.values()
                 if s.task and not s.task.done()
-            ]
-            log.info("Active listeners: %s", len(active))
+            )
+            logging.warning("Active listeners: %s", active)
 
 
 # =========================
