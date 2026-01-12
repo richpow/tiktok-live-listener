@@ -17,6 +17,7 @@ from TikTokLive.events import GiftEvent
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
+
 DIAMOND_ALERT_THRESHOLD = int(os.getenv("DIAMOND_ALERT_THRESHOLD", "9999"))
 
 SCAN_DELAY_BETWEEN_CREATORS = float(os.getenv("SCAN_DELAY_BETWEEN_CREATORS", "0.4"))
@@ -28,17 +29,22 @@ PROBE_TIMEOUT = float(os.getenv("PROBE_TIMEOUT", "6"))
 IDLE_RECONNECT_SECONDS = int(os.getenv("IDLE_RECONNECT_SECONDS", "900"))
 CREATOR_REFRESH_SECONDS = int(os.getenv("CREATOR_REFRESH_SECONDS", "600"))
 
+STATUS_LOG_SECONDS = int(os.getenv("STATUS_LOG_SECONDS", "300"))
+
+# Optional, keep default false to protect Railway log limits
+DEBUG_LISTENERS = os.getenv("DEBUG_LISTENERS", "false").strip().lower() in {"1", "true", "yes"}
+
 
 # =========================
-# Logging (STRICT)
+# Logging, Railway safe
 # =========================
 
 logging.basicConfig(
-    level=logging.WARNING,  # <-- important
+    level=logging.WARNING,
     format="%(asctime)s %(levelname)s %(message)s",
 )
 
-# Kill noisy libraries completely
+# Silence noisy libraries
 logging.getLogger("TikTokLive").setLevel(logging.ERROR)
 logging.getLogger("aiohttp").setLevel(logging.ERROR)
 logging.getLogger("httpx").setLevel(logging.ERROR)
@@ -64,7 +70,6 @@ class CreatorState:
 # =========================
 
 class GiftListenerService:
-
     def __init__(self):
         if not DATABASE_URL:
             raise RuntimeError("DATABASE_URL missing")
@@ -116,8 +121,6 @@ class GiftListenerService:
             """
         )
         self.creators = [r["tiktok_username"] for r in rows]
-
-        # ONE startup log only
         logging.warning("Loaded %s creators", len(self.creators))
 
 
@@ -166,6 +169,9 @@ class GiftListenerService:
     async def listener_loop(self, state: CreatorState):
         username = state.username
 
+        if DEBUG_LISTENERS:
+            logging.warning("Listening: %s", username)
+
         while not state.stopping:
             client = TikTokLiveClient(unique_id=username)
 
@@ -179,6 +185,8 @@ class GiftListenerService:
                 )
                 total = diamonds * event.repeat_count
 
+                gift_name = getattr(event.gift, "name", "Unknown Gift")
+
                 gift_image_url = None
                 if getattr(event.gift, "image", None):
                     urls = getattr(event.gift.image, "url_list", [])
@@ -186,42 +194,47 @@ class GiftListenerService:
                         gift_image_url = urls[0]
 
                 await self.log_gift(
-                    username,
-                    event.user.unique_id,
-                    event.user.nickname,
-                    event.gift.name,
-                    diamonds,
-                    event.repeat_count,
-                    total,
+                    creator=username,
+                    sender=event.user.unique_id,
+                    sender_name=event.user.nickname,
+                    gift=gift_name,
+                    per_item=diamonds,
+                    count=event.repeat_count,
+                    total=total,
                 )
 
                 if total >= DIAMOND_ALERT_THRESHOLD:
                     await self.send_discord(
-                        username,
-                        event.user.unique_id,
-                        event.user.nickname,
-                        event.gift.name,
-                        total,
-                        gift_image_url,
+                        creator=username,
+                        sender=event.user.unique_id,
+                        sender_name=event.user.nickname,
+                        gift=gift_name,
+                        diamonds=total,
+                        gift_image_url=gift_image_url,
                     )
 
             async def idle_watch():
                 while True:
                     await asyncio.sleep(30)
                     if time.time() - state.last_event > IDLE_RECONNECT_SECONDS:
-                        await client.stop()
+                        try:
+                            await client.disconnect()
+                        except Exception:
+                            pass
                         return
 
             idle_task = asyncio.create_task(idle_watch())
 
             try:
-                await client.start()  # <-- FIXED coroutine usage
+                # Correct TikTokLive lifecycle for event stream
+                await client.connect()
+                await client.run()
             except Exception:
                 pass
             finally:
                 idle_task.cancel()
                 try:
-                    await client.stop()
+                    await client.disconnect()
                 except Exception:
                     pass
 
@@ -231,13 +244,13 @@ class GiftListenerService:
 
     async def log_gift(
         self,
-        creator,
-        sender,
-        sender_name,
-        gift,
-        per_item,
-        count,
-        total,
+        creator: str,
+        sender: str,
+        sender_name: str,
+        gift: str,
+        per_item: int,
+        count: int,
+        total: int,
     ):
         try:
             await self.pool.execute(
@@ -266,12 +279,12 @@ class GiftListenerService:
 
     async def send_discord(
         self,
-        creator,
-        sender,
-        sender_name,
-        gift,
-        diamonds,
-        gift_image_url,
+        creator: str,
+        sender: str,
+        sender_name: str,
+        gift: str,
+        diamonds: int,
+        gift_image_url: Optional[str],
     ):
         if not DISCORD_WEBHOOK_URL:
             return
@@ -296,7 +309,7 @@ class GiftListenerService:
 
     async def status_loop(self):
         while True:
-            await asyncio.sleep(300)
+            await asyncio.sleep(STATUS_LOG_SECONDS)
             active = sum(
                 1 for s in self.states.values()
                 if s.task and not s.task.done()
