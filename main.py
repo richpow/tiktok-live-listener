@@ -30,7 +30,7 @@ CREATOR_REFRESH_SECONDS = int(os.getenv("CREATOR_REFRESH_SECONDS", "600"))
 
 
 # =========================
-# Logging
+# Logging (Railway-safe)
 # =========================
 
 logging.basicConfig(
@@ -38,8 +38,11 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 
+# Silence noisy libraries completely
 logging.getLogger("TikTokLive").setLevel(logging.WARNING)
 logging.getLogger("aiohttp").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 log = logging.getLogger("listener")
 
@@ -77,7 +80,10 @@ class GiftListenerService:
 
     async def start(self):
         self.pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=8)
-        self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8))
+        self.http = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=8),
+            raise_for_status=False,
+        )
 
         await self.refresh_creators()
 
@@ -101,6 +107,7 @@ class GiftListenerService:
             await self.pool.close()
 
 
+    # -------------------------
     async def refresh_creators(self):
         rows = await self.pool.fetch(
             """
@@ -125,6 +132,7 @@ class GiftListenerService:
                 log.warning("Creator refresh failed: %s", e)
 
 
+    # -------------------------
     async def scan_loop(self):
         while True:
             for username in self.creators:
@@ -158,6 +166,7 @@ class GiftListenerService:
                     pass
 
 
+    # -------------------------
     async def listener_loop(self, state: CreatorState):
         username = state.username
         log.info("▶ Listening: %s", username)
@@ -230,6 +239,7 @@ class GiftListenerService:
         log.info("■ Stopped: %s", username)
 
 
+    # -------------------------
     async def log_gift(
         self,
         creator,
@@ -295,17 +305,15 @@ class GiftListenerService:
             pass
 
 
+    # -------------------------
     async def status_loop(self):
         while True:
-            await asyncio.sleep(120)
+            await asyncio.sleep(300)
             active = [
                 u for u, s in self.states.items()
                 if s.task and not s.task.done()
             ]
-            if active:
-                log.info("Active listeners (%s): %s", len(active), ", ".join(active))
-            else:
-                log.info("No active listeners")
+            log.info("Active listeners: %s", len(active))
 
 
 # =========================
