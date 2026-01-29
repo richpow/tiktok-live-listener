@@ -3,6 +3,8 @@ import asyncio
 import time
 import logging
 import ssl
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Dict, Optional, List
 
@@ -11,10 +13,6 @@ import asyncpg
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import GiftEvent
 
-
-# =========================
-# Environment
-# =========================
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
@@ -33,10 +31,6 @@ IDLE_RECONNECT_SECONDS = int(os.getenv("IDLE_RECONNECT_SECONDS", "900"))
 CREATOR_REFRESH_SECONDS = int(os.getenv("CREATOR_REFRESH_SECONDS", "600"))
 
 
-# =========================
-# Logging (quiet + safe)
-# =========================
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -49,10 +43,6 @@ logging.getLogger("aiohttp").setLevel(logging.WARNING)
 log = logging.getLogger("listener")
 
 
-# =========================
-# State
-# =========================
-
 @dataclass
 class CreatorState:
     username: str
@@ -61,12 +51,25 @@ class CreatorState:
     stopping: bool = False
 
 
-# =========================
-# Service
-# =========================
+def _strip_to_ascii(s: str) -> str:
+    if not s:
+        return ""
+    normalized = unicodedata.normalize("NFKD", s)
+    return normalized.encode("ascii", "ignore").decode("ascii")
+
+
+def _slugify(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = _strip_to_ascii(s)
+    s = s.replace("&", "and")
+    s = re.sub(r"[’`´]", "'", s)
+    s = s.replace("'", "")
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    s = re.sub(r"_+", "_", s).strip("_")
+    return s
+
 
 class GiftListenerService:
-
     def __init__(self):
         if not DATABASE_URL:
             raise RuntimeError("DATABASE_URL missing")
@@ -79,11 +82,11 @@ class GiftListenerService:
 
         self.probe_sem = asyncio.Semaphore(MAX_PROBE_CONCURRENCY)
 
+        self.image_cache: Dict[str, Optional[str]] = {}
+        self.printed_gift_fields_once = False
 
-    # -------------------------
+
     async def start(self):
-        # Fix for Neon TLS in minimal containers:
-        # Create an SSL context that uses the system CA store.
         ssl_ctx = ssl.create_default_context()
 
         self.pool = await asyncpg.create_pool(
@@ -117,7 +120,6 @@ class GiftListenerService:
             await self.pool.close()
 
 
-    # -------------------------
     async def refresh_creators(self):
         rows = await self.pool.fetch(
             """
@@ -142,7 +144,6 @@ class GiftListenerService:
                 log.warning("Creator refresh failed: %s", e)
 
 
-    # -------------------------
     async def scan_loop(self):
         while True:
             for username in self.creators:
@@ -176,10 +177,77 @@ class GiftListenerService:
                     pass
 
 
-    # -------------------------
+    def _extract_image_url_from_gift(self, gift_obj) -> Optional[str]:
+        if not gift_obj:
+            return None
+
+        candidate_attrs = [
+            "image",
+            "icon",
+            "picture",
+            "url",
+            "image_url",
+            "icon_url",
+            "picture_url",
+            "gift_picture_url",
+        ]
+
+        for attr in candidate_attrs:
+            try:
+                val = getattr(gift_obj, attr, None)
+            except Exception:
+                val = None
+
+            if isinstance(val, str) and val.startswith("http"):
+                return val
+
+            if val:
+                for sub in ["url", "uri"]:
+                    try:
+                        subval = getattr(val, sub, None)
+                    except Exception:
+                        subval = None
+                    if isinstance(subval, str) and subval.startswith("http"):
+                        return subval
+
+                if isinstance(val, dict):
+                    for k in ["url", "uri"]:
+                        subval = val.get(k)
+                        if isinstance(subval, str) and subval.startswith("http"):
+                            return subval
+
+        return None
+
+
+    async def _github_image_url_if_exists(self, gift_name: str) -> Optional[str]:
+        if not self.http:
+            return None
+
+        if gift_name in self.image_cache:
+            return self.image_cache[gift_name]
+
+        key = _slugify(gift_name)
+        if not key:
+            self.image_cache[gift_name] = None
+            return None
+
+        url = f"{GITHUB_BASE}/{key}.png?raw=true"
+
+        try:
+            async with self.http.get(url) as resp:
+                if resp.status == 200:
+                    self.image_cache[gift_name] = url
+                    return url
+        except Exception:
+            pass
+
+        self.image_cache[gift_name] = None
+        return None
+
+
     async def listener_loop(self, state: CreatorState):
         username = state.username
-        log.info("▶ Listening: %s", username)
+        log.info("Listening: %s", username)
 
         while not state.stopping:
             client = TikTokLiveClient(unique_id=username)
@@ -187,6 +255,15 @@ class GiftListenerService:
             @client.on(GiftEvent)
             async def on_gift(event: GiftEvent):
                 state.last_event = time.time()
+
+                if not self.printed_gift_fields_once:
+                    self.printed_gift_fields_once = True
+                    try:
+                        gift_obj = getattr(event, "gift", None)
+                        fields = [x for x in dir(gift_obj) if not x.startswith("_")] if gift_obj else []
+                        log.info("Gift fields seen: %s", ", ".join(fields[:120]))
+                    except Exception:
+                        log.info("Could not inspect gift fields")
 
                 diamonds = (
                     getattr(event.gift, "diamond_count", 0)
@@ -206,11 +283,12 @@ class GiftListenerService:
 
                 if total >= DIAMOND_ALERT_THRESHOLD:
                     await self.send_discord(
-                        username,
-                        event.user.unique_id,
-                        event.user.nickname,
-                        event.gift.name,
-                        total,
+                        creator=username,
+                        sender=event.user.unique_id,
+                        sender_name=event.user.nickname,
+                        gift=event.gift.name,
+                        diamonds=total,
+                        gift_obj=getattr(event, "gift", None),
                     )
 
             async def idle_watch():
@@ -237,10 +315,9 @@ class GiftListenerService:
                 if not state.stopping:
                     await asyncio.sleep(5)
 
-        log.info("■ Stopped: %s", username)
+        log.info("Stopped: %s", username)
 
 
-    # -------------------------
     async def log_gift(
         self,
         creator,
@@ -283,18 +360,33 @@ class GiftListenerService:
         sender_name,
         gift,
         diamonds,
+        gift_obj,
     ):
-        if not DISCORD_WEBHOOK_URL:
+        if not DISCORD_WEBHOOK_URL or not self.http:
             return
+
+        tiktok_image_url = self._extract_image_url_from_gift(gift_obj)
+        github_image_url = await self._github_image_url_if_exists(gift)
+        image_url = tiktok_image_url or github_image_url
+
+        if tiktok_image_url:
+            log.info("Using TikTok image for gift: %s", gift)
+        elif github_image_url:
+            log.info("Using GitHub image for gift: %s", gift)
+        else:
+            log.info("No image found for gift: %s", gift)
 
         embed = {
             "title": "Gift Alert",
             "description": f"{creator} received {gift}",
             "fields": [
                 {"name": "From", "value": f"{sender} | {sender_name}"},
-                {"name": "Diamonds", "value": f"{diamonds:,}"},
+                {"name": "Diamonds", "value": f"{int(diamonds or 0):,}"},
             ],
         }
+
+        if image_url:
+            embed["thumbnail"] = {"url": image_url}
 
         try:
             await self.http.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]})
@@ -302,7 +394,6 @@ class GiftListenerService:
             pass
 
 
-    # -------------------------
     async def status_loop(self):
         while True:
             await asyncio.sleep(120)
@@ -315,10 +406,6 @@ class GiftListenerService:
             else:
                 log.info("No active listeners")
 
-
-# =========================
-# Entrypoint
-# =========================
 
 async def main():
     svc = GiftListenerService()
