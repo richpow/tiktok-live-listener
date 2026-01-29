@@ -86,8 +86,9 @@ class GiftListenerService:
 
         self.probe_sem = asyncio.Semaphore(MAX_PROBE_CONCURRENCY)
 
-        self.image_cache: Dict[str, Optional[str]] = {}
+        self.github_cache: Dict[str, Optional[str]] = {}
         self.streamtoearn_map: Dict[str, str] = {}
+
         self.printed_gift_fields_once = False
 
 
@@ -176,32 +177,20 @@ class GiftListenerService:
 
         mapping: Dict[str, str] = {}
 
-        # Very tolerant parsing:
-        # Find pairs of (image url, nearby gift name) in the HTML.
-        # This avoids relying on a specific DOM structure that might change.
-        #
-        # We accept common image extensions and both absolute and relative urls.
         img_re = re.compile(r'src="([^"]+\.(?:png|jpg|jpeg|webp)[^"]*)"', re.IGNORECASE)
         name_re = re.compile(r'>([^<>]{1,80})<')
 
-        imgs = img_re.findall(html)
-        if not imgs:
-            log.warning("Streamtoearn parse found no images")
-            return
+        found_any_img = False
 
-        # Create a rolling window over the HTML to associate an image with a nearby label.
-        # This is imperfect, but it is better than name to filename guessing alone.
-        # We also store by slug so minor punctuation differences still match.
         for m in img_re.finditer(html):
+            found_any_img = True
             img_url = m.group(1)
 
-            # Normalize url
             if img_url.startswith("//"):
                 img_url = "https:" + img_url
             elif img_url.startswith("/"):
                 img_url = "https://streamtoearn.io" + img_url
 
-            # Look ahead for a plausible label
             window = html[m.end(): m.end() + 800]
             nm = name_re.search(window)
             if not nm:
@@ -214,6 +203,10 @@ class GiftListenerService:
             slug = _slugify(label)
             if slug and slug not in mapping:
                 mapping[slug] = img_url
+
+        if not found_any_img:
+            log.warning("Streamtoearn parse found no images")
+            return
 
         if not mapping:
             log.warning("Streamtoearn parse found no name mappings")
@@ -309,12 +302,12 @@ class GiftListenerService:
         if not self.http:
             return None
 
-        if gift_name in self.image_cache:
-            return self.image_cache[gift_name]
+        if gift_name in self.github_cache:
+            return self.github_cache[gift_name]
 
         key = _slugify(gift_name)
         if not key:
-            self.image_cache[gift_name] = None
+            self.github_cache[gift_name] = None
             return None
 
         url = f"{GITHUB_BASE}/{key}.png?raw=true"
@@ -322,12 +315,12 @@ class GiftListenerService:
         try:
             async with self.http.get(url) as resp:
                 if resp.status == 200:
-                    self.image_cache[gift_name] = url
+                    self.github_cache[gift_name] = url
                     return url
         except Exception:
             pass
 
-        self.image_cache[gift_name] = None
+        self.github_cache[gift_name] = None
         return None
 
 
@@ -381,13 +374,15 @@ class GiftListenerService:
                 while True:
                     await asyncio.sleep(30)
                     if time.time() - state.last_event > IDLE_RECONNECT_SECONDS:
-                        await client.disconnect()
+                        try:
+                            await client.disconnect()
+                        except Exception:
+                            pass
                         return
 
             idle_task = asyncio.create_task(idle_watch())
 
             try:
-                await client.connect()
                 await client.run()
             except Exception:
                 pass
@@ -478,10 +473,7 @@ class GiftListenerService:
     async def status_loop(self):
         while True:
             await asyncio.sleep(120)
-            active = [
-                u for u, s in self.states.items()
-                if s.task and not s.task.done()
-            ]
+            active = [u for u, s in self.states.items() if s.task and not s.task.done()]
             if active:
                 log.info("Active listeners (%s): %s", len(active), ", ".join(active))
             else:
