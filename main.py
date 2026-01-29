@@ -2,6 +2,7 @@ import os
 import asyncio
 import time
 import logging
+import ssl
 from dataclasses import dataclass, field
 from typing import Dict, Optional, List
 
@@ -81,7 +82,17 @@ class GiftListenerService:
 
     # -------------------------
     async def start(self):
-        self.pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=8)
+        # Fix for Neon TLS in minimal containers:
+        # Create an SSL context that uses the system CA store.
+        ssl_ctx = ssl.create_default_context()
+
+        self.pool = await asyncpg.create_pool(
+            dsn=DATABASE_URL,
+            ssl=ssl_ctx,
+            min_size=1,
+            max_size=8,
+        )
+
         self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8))
 
         await self.refresh_creators()
