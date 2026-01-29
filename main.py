@@ -21,6 +21,10 @@ DIAMOND_ALERT_THRESHOLD = int(os.getenv("DIAMOND_ALERT_THRESHOLD", "9999"))
 
 GITHUB_BASE = "https://raw.githubusercontent.com/richpow/tiktok-live-listener/main/gifts"
 
+STREAMTOEARN_REGION = os.getenv("STREAMTOEARN_REGION", "GB")
+STREAMTOEARN_URL = f"https://streamtoearn.io/gifts?region={STREAMTOEARN_REGION}"
+STREAMTOEARN_REFRESH_SECONDS = int(os.getenv("STREAMTOEARN_REFRESH_SECONDS", "3600"))
+
 SCAN_DELAY_BETWEEN_CREATORS = float(os.getenv("SCAN_DELAY_BETWEEN_CREATORS", "0.4"))
 SCAN_SLEEP_BETWEEN_PASSES = float(os.getenv("SCAN_SLEEP_BETWEEN_PASSES", "12"))
 
@@ -83,6 +87,7 @@ class GiftListenerService:
         self.probe_sem = asyncio.Semaphore(MAX_PROBE_CONCURRENCY)
 
         self.image_cache: Dict[str, Optional[str]] = {}
+        self.streamtoearn_map: Dict[str, str] = {}
         self.printed_gift_fields_once = False
 
 
@@ -96,12 +101,14 @@ class GiftListenerService:
             max_size=8,
         )
 
-        self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8))
+        self.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12))
 
         await self.refresh_creators()
+        await self.refresh_streamtoearn_map()
 
         await asyncio.gather(
             self.creator_refresh_loop(),
+            self.streamtoearn_refresh_loop(),
             self.scan_loop(),
             self.status_loop(),
         )
@@ -142,6 +149,78 @@ class GiftListenerService:
                 await self.refresh_creators()
             except Exception as e:
                 log.warning("Creator refresh failed: %s", e)
+
+
+    async def streamtoearn_refresh_loop(self):
+        while True:
+            await asyncio.sleep(STREAMTOEARN_REFRESH_SECONDS)
+            try:
+                await self.refresh_streamtoearn_map()
+            except Exception as e:
+                log.warning("Streamtoearn refresh failed: %s", e)
+
+
+    async def refresh_streamtoearn_map(self):
+        if not self.http:
+            return
+
+        try:
+            async with self.http.get(STREAMTOEARN_URL) as resp:
+                if resp.status != 200:
+                    log.warning("Streamtoearn HTTP %s", resp.status)
+                    return
+                html = await resp.text()
+        except Exception as e:
+            log.warning("Streamtoearn fetch error: %s", e)
+            return
+
+        mapping: Dict[str, str] = {}
+
+        # Very tolerant parsing:
+        # Find pairs of (image url, nearby gift name) in the HTML.
+        # This avoids relying on a specific DOM structure that might change.
+        #
+        # We accept common image extensions and both absolute and relative urls.
+        img_re = re.compile(r'src="([^"]+\.(?:png|jpg|jpeg|webp)[^"]*)"', re.IGNORECASE)
+        name_re = re.compile(r'>([^<>]{1,80})<')
+
+        imgs = img_re.findall(html)
+        if not imgs:
+            log.warning("Streamtoearn parse found no images")
+            return
+
+        # Create a rolling window over the HTML to associate an image with a nearby label.
+        # This is imperfect, but it is better than name to filename guessing alone.
+        # We also store by slug so minor punctuation differences still match.
+        for m in img_re.finditer(html):
+            img_url = m.group(1)
+
+            # Normalize url
+            if img_url.startswith("//"):
+                img_url = "https:" + img_url
+            elif img_url.startswith("/"):
+                img_url = "https://streamtoearn.io" + img_url
+
+            # Look ahead for a plausible label
+            window = html[m.end(): m.end() + 800]
+            nm = name_re.search(window)
+            if not nm:
+                continue
+
+            label = nm.group(1).strip()
+            if not label:
+                continue
+
+            slug = _slugify(label)
+            if slug and slug not in mapping:
+                mapping[slug] = img_url
+
+        if not mapping:
+            log.warning("Streamtoearn parse found no name mappings")
+            return
+
+        self.streamtoearn_map = mapping
+        log.info("Streamtoearn map loaded (%s entries) for region %s", len(mapping), STREAMTOEARN_REGION)
 
 
     async def scan_loop(self):
@@ -217,6 +296,13 @@ class GiftListenerService:
                             return subval
 
         return None
+
+
+    def _streamtoearn_image_url(self, gift_name: str) -> Optional[str]:
+        slug = _slugify(gift_name)
+        if not slug:
+            return None
+        return self.streamtoearn_map.get(slug)
 
 
     async def _github_image_url_if_exists(self, gift_name: str) -> Optional[str]:
@@ -366,15 +452,10 @@ class GiftListenerService:
             return
 
         tiktok_image_url = self._extract_image_url_from_gift(gift_obj)
+        streamtoearn_image_url = self._streamtoearn_image_url(gift)
         github_image_url = await self._github_image_url_if_exists(gift)
-        image_url = tiktok_image_url or github_image_url
 
-        if tiktok_image_url:
-            log.info("Using TikTok image for gift: %s", gift)
-        elif github_image_url:
-            log.info("Using GitHub image for gift: %s", gift)
-        else:
-            log.info("No image found for gift: %s", gift)
+        image_url = tiktok_image_url or streamtoearn_image_url or github_image_url
 
         embed = {
             "title": "Gift Alert",
